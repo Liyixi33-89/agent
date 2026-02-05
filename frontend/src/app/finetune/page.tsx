@@ -1,0 +1,647 @@
+"use client";
+
+import { Sidebar } from "@/components/Sidebar";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Hammer, Play, CheckCircle, XCircle, Clock, RefreshCw, TestTube, Trash2 } from "lucide-react";
+import { useEffect, useState, useCallback, useRef } from "react";
+
+const API_BASE_URL = "http://localhost:8000";
+
+// 预训练模型列表
+const PRETRAINED_MODELS = [
+  {
+    value: "bert-base-uncased",
+    label: "BERT Base (英文)",
+    description: "英文基础BERT模型，适合英文文本分类",
+    language: "英文",
+  },
+  {
+    value: "bert-base-cased",
+    label: "BERT Base Cased (英文)",
+    description: "英文BERT模型，区分大小写",
+    language: "英文",
+  },
+  {
+    value: "bert-base-chinese",
+    label: "BERT Base (中文)",
+    description: "中文基础BERT模型，适合中文文本分类",
+    language: "中文",
+  },
+  {
+    value: "bert-base-multilingual-cased",
+    label: "BERT Multilingual (多语言)",
+    description: "支持104种语言的多语言BERT",
+    language: "多语言",
+  },
+  {
+    value: "hfl/chinese-bert-wwm-ext",
+    label: "Chinese BERT WWM (中文增强)",
+    description: "哈工大中文BERT，全词遮蔽，效果更好",
+    language: "中文",
+  },
+  {
+    value: "hfl/chinese-roberta-wwm-ext",
+    label: "Chinese RoBERTa WWM (中文)",
+    description: "哈工大中文RoBERTa，性能更强",
+    language: "中文",
+  },
+  {
+    value: "distilbert-base-uncased",
+    label: "DistilBERT (英文轻量)",
+    description: "BERT的轻量版本，速度快60%",
+    language: "英文",
+  },
+  {
+    value: "roberta-base",
+    label: "RoBERTa Base (英文)",
+    description: "优化版BERT，性能更强",
+    language: "英文",
+  },
+];
+
+interface FinetuneTask {
+  id: string;
+  base_model: string;
+  new_model_name: string;
+  dataset_path: string;
+  epochs: number;
+  learning_rate: number;
+  batch_size: number;
+  max_length: number;
+  text_column: string;
+  label_column: string;
+  status: string;
+  progress: number;
+  error_message?: string;
+  model_path?: string;
+  training_history?: any;
+  metrics?: any;
+  created_at: string;
+  started_at?: string;
+  completed_at?: string;
+}
+
+interface TestResult {
+  text: string;
+  prediction: number;
+  confidence: number;
+}
+
+export default function FinetunePage() {
+  const [tasks, setTasks] = useState<FinetuneTask[]>([]);
+  const [showForm, setShowForm] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [testingTaskId, setTestingTaskId] = useState<string | null>(null);
+  const [testInput, setTestInput] = useState("");
+  const [testResult, setTestResult] = useState<TestResult | null>(null);
+  const pollingRef = useRef<NodeJS.Timeout | null>(null);
+  
+  const [formData, setFormData] = useState({
+    base_model: "bert-base-uncased",
+    dataset_path: "",
+    new_model_name: "",
+    epochs: 3,
+    learning_rate: 2e-5,
+    batch_size: 32,
+    max_length: 512,
+    text_column: "text",
+    label_column: "target",
+  });
+
+  // 加载任务列表
+  const fetchTasks = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/finetune`);
+      if (res.ok) {
+        const data = await res.json();
+        setTasks(data);
+        return data;
+      }
+    } catch (error) {
+      console.error("获取任务列表失败:", error);
+    }
+    return [];
+  }, []);
+
+  // 初始化加载任务
+  useEffect(() => {
+    const loadTasks = async () => {
+      setIsLoading(true);
+      await fetchTasks();
+      setIsLoading(false);
+    };
+    loadTasks();
+  }, [fetchTasks]);
+
+  // 轮询更新运行中的任务状态
+  useEffect(() => {
+    const hasRunningTask = tasks.some(
+      (task) => task.status === "running" || task.status === "pending"
+    );
+
+    if (hasRunningTask) {
+      // 如果有运行中的任务，每3秒轮询一次
+      pollingRef.current = setInterval(() => {
+        fetchTasks();
+      }, 3000);
+    } else {
+      // 没有运行中的任务，停止轮询
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current);
+        pollingRef.current = null;
+      }
+    }
+
+    return () => {
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current);
+      }
+    };
+  }, [tasks, fetchTasks]);
+
+  // 提交微调任务
+  const handleSubmit = async () => {
+    if (!formData.dataset_path || !formData.new_model_name) {
+      alert("请填写数据集路径和模型名称");
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/finetune`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(formData),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        alert(`微调任务已启动！任务ID: ${data.task_id}`);
+        setShowForm(false);
+        // 重新加载任务列表
+        await fetchTasks();
+      } else {
+        const error = await res.json();
+        alert(`启动失败: ${error.detail || "未知错误"}`);
+      }
+    } catch (error) {
+      console.error("提交微调任务失败:", error);
+      alert("提交失败，请检查后端服务是否运行");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // 删除任务
+  const handleDeleteTask = async (taskId: string) => {
+    if (!confirm("确定要删除这个任务吗？")) return;
+    
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/finetune/${taskId}`, {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        setTasks((prev) => prev.filter((t) => t.id !== taskId));
+      } else {
+        alert("删除失败");
+      }
+    } catch (error) {
+      console.error("删除任务失败:", error);
+    }
+  };
+
+  // 测试模型
+  const handleTestModel = async (task: FinetuneTask) => {
+    if (!testInput.trim()) {
+      alert("请输入测试文本");
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/models/predict`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model_path: task.model_path,
+          text: testInput,
+          base_model: task.base_model,
+        }),
+      });
+
+      if (res.ok) {
+        const result = await res.json();
+        setTestResult({
+          text: testInput,
+          prediction: result.prediction,
+          confidence: result.confidence,
+        });
+      } else {
+        alert("预测失败，请检查模型是否可用");
+      }
+    } catch (error) {
+      console.error("模型预测失败:", error);
+      alert("模型预测失败");
+    }
+  };
+
+  const handleInputChange = (field: string, value: string | number) => {
+    setFormData((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const getStatusIcon = (status: string) => {
+    switch (status) {
+      case "completed":
+        return <CheckCircle className="h-5 w-5 text-green-500" />;
+      case "failed":
+        return <XCircle className="h-5 w-5 text-red-500" />;
+      case "running":
+        return <RefreshCw className="h-5 w-5 text-blue-500 animate-spin" />;
+      default:
+        return <Clock className="h-5 w-5 text-yellow-500" />;
+    }
+  };
+
+  const getStatusText = (status: string) => {
+    const statusMap: Record<string, string> = {
+      pending: "等待中",
+      running: "运行中",
+      completed: "已完成",
+      failed: "失败",
+    };
+    return statusMap[status] || status;
+  };
+
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case "completed":
+        return "text-green-500";
+      case "failed":
+        return "text-red-500";
+      case "running":
+        return "text-blue-500";
+      default:
+        return "text-yellow-500";
+    }
+  };
+
+  // 格式化时间
+  const formatTime = (isoString?: string) => {
+    if (!isoString) return "-";
+    const date = new Date(isoString);
+    return date.toLocaleString("zh-CN");
+  };
+
+  // 计算耗时
+  const calcDuration = (task: FinetuneTask) => {
+    if (!task.started_at) return null;
+    const start = new Date(task.started_at).getTime();
+    const end = task.completed_at
+      ? new Date(task.completed_at).getTime()
+      : Date.now();
+    const seconds = Math.round((end - start) / 1000);
+    if (seconds < 60) return `${seconds}秒`;
+    const minutes = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${minutes}分${secs}秒`;
+  };
+
+  return (
+    <div className="flex min-h-screen">
+      <Sidebar />
+      <main className="flex-1 bg-muted/10 p-8">
+        <div className="mb-8 flex items-center justify-between">
+          <div>
+            <h1 className="text-3xl font-bold tracking-tight">模型微调</h1>
+            <p className="text-muted-foreground">
+              使用您的数据集微调预训练模型
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={fetchTasks}
+              className="flex items-center gap-2 rounded-lg border px-4 py-2 hover:bg-accent"
+              aria-label="刷新任务列表"
+              tabIndex={0}
+            >
+              <RefreshCw className="h-4 w-4" />
+              刷新
+            </button>
+            <button
+              onClick={() => setShowForm(!showForm)}
+              className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-primary-foreground hover:bg-primary/90"
+              aria-label="新建微调任务"
+              tabIndex={0}
+            >
+              <Hammer className="h-4 w-4" />
+              新建微调任务
+            </button>
+          </div>
+        </div>
+
+        {/* 微调表单 */}
+        {showForm && (
+          <Card className="mb-6">
+            <CardHeader>
+              <CardTitle>配置微调任务</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid gap-4 md:grid-cols-2">
+                <div>
+                  <label className="mb-2 block text-sm font-medium">基础模型 *</label>
+                  <select
+                    value={formData.base_model}
+                    onChange={(e) => handleInputChange("base_model", e.target.value)}
+                    className="w-full rounded-lg border bg-background px-3 py-2 cursor-pointer"
+                    aria-label="选择基础模型"
+                  >
+                    {PRETRAINED_MODELS.map((model) => (
+                      <option key={model.value} value={model.value}>
+                        {model.label}
+                      </option>
+                    ))}
+                  </select>
+                  {/* 显示选中模型的描述 */}
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {PRETRAINED_MODELS.find((m) => m.value === formData.base_model)?.description || ""}
+                  </p>
+                </div>
+                <div>
+                  <label className="mb-2 block text-sm font-medium">新模型名称 *</label>
+                  <input
+                    type="text"
+                    value={formData.new_model_name}
+                    onChange={(e) => handleInputChange("new_model_name", e.target.value)}
+                    className="w-full rounded-lg border bg-background px-3 py-2"
+                    placeholder="my-custom-model"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="mb-2 block text-sm font-medium">数据集路径 *</label>
+                <input
+                  type="text"
+                  value={formData.dataset_path}
+                  onChange={(e) => handleInputChange("dataset_path", e.target.value)}
+                  className="w-full rounded-lg border bg-background px-3 py-2"
+                  placeholder="data/sample_train.csv"
+                />
+                <p className="mt-1 text-xs text-muted-foreground">支持 CSV 或 JSON 格式，示例：data/sample_train.csv</p>
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-4">
+                <div>
+                  <label className="mb-2 block text-sm font-medium">训练轮数</label>
+                  <input
+                    type="number"
+                    value={formData.epochs}
+                    onChange={(e) => handleInputChange("epochs", parseInt(e.target.value))}
+                    className="w-full rounded-lg border bg-background px-3 py-2"
+                    min={1}
+                    max={100}
+                  />
+                </div>
+                <div>
+                  <label className="mb-2 block text-sm font-medium">学习率</label>
+                  <input
+                    type="text"
+                    value={formData.learning_rate}
+                    onChange={(e) => handleInputChange("learning_rate", parseFloat(e.target.value))}
+                    className="w-full rounded-lg border bg-background px-3 py-2"
+                  />
+                </div>
+                <div>
+                  <label className="mb-2 block text-sm font-medium">批次大小</label>
+                  <input
+                    type="number"
+                    value={formData.batch_size}
+                    onChange={(e) => handleInputChange("batch_size", parseInt(e.target.value))}
+                    className="w-full rounded-lg border bg-background px-3 py-2"
+                  />
+                </div>
+                <div>
+                  <label className="mb-2 block text-sm font-medium">最大长度</label>
+                  <input
+                    type="number"
+                    value={formData.max_length}
+                    onChange={(e) => handleInputChange("max_length", parseInt(e.target.value))}
+                    className="w-full rounded-lg border bg-background px-3 py-2"
+                  />
+                </div>
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-2">
+                <div>
+                  <label className="mb-2 block text-sm font-medium">文本列名</label>
+                  <input
+                    type="text"
+                    value={formData.text_column}
+                    onChange={(e) => handleInputChange("text_column", e.target.value)}
+                    className="w-full rounded-lg border bg-background px-3 py-2"
+                    placeholder="text"
+                  />
+                </div>
+                <div>
+                  <label className="mb-2 block text-sm font-medium">标签列名</label>
+                  <input
+                    type="text"
+                    value={formData.label_column}
+                    onChange={(e) => handleInputChange("label_column", e.target.value)}
+                    className="w-full rounded-lg border bg-background px-3 py-2"
+                    placeholder="target"
+                  />
+                </div>
+              </div>
+
+              <div className="flex gap-2">
+                <button
+                  onClick={handleSubmit}
+                  disabled={isSubmitting}
+                  className="rounded-lg bg-primary px-4 py-2 text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+                >
+                  {isSubmitting ? "提交中..." : "开始微调"}
+                </button>
+                <button
+                  onClick={() => setShowForm(false)}
+                  className="rounded-lg border px-4 py-2 hover:bg-accent"
+                >
+                  取消
+                </button>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* 任务列表 */}
+        {isLoading ? (
+          <Card>
+            <CardContent className="flex items-center justify-center py-12">
+              <RefreshCw className="mr-2 h-6 w-6 animate-spin" />
+              <p>加载中...</p>
+            </CardContent>
+          </Card>
+        ) : tasks.length === 0 ? (
+          <Card>
+            <CardContent className="flex flex-col items-center justify-center py-12">
+              <Hammer className="mb-4 h-12 w-12 text-muted-foreground" />
+              <p className="text-lg font-medium">暂无微调任务</p>
+              <p className="text-muted-foreground">点击上方按钮创建您的第一个微调任务</p>
+            </CardContent>
+          </Card>
+        ) : (
+          <div className="space-y-4">
+            {tasks.map((task) => (
+              <Card key={task.id} className="overflow-hidden">
+                <CardContent className="p-0">
+                  {/* 主要信息行 */}
+                  <div className="flex items-center justify-between p-4">
+                    <div className="flex items-center gap-4">
+                      {getStatusIcon(task.status)}
+                      <div>
+                        <p className="font-medium text-lg">{task.new_model_name}</p>
+                        <p className="text-sm text-muted-foreground">
+                          基于 {task.base_model} 
+                          <span className="ml-1 text-xs px-1.5 py-0.5 rounded bg-muted">
+                            {PRETRAINED_MODELS.find((m) => m.value === task.base_model)?.language || "未知"}
+                          </span>
+                          {" "}| {task.epochs} 轮训练
+                        </p>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          创建于: {formatTime(task.created_at)}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-4">
+                      <div className="text-right">
+                        <p className={`font-medium ${getStatusColor(task.status)}`}>
+                          {getStatusText(task.status)}
+                        </p>
+                        {calcDuration(task) && (
+                          <p className="text-sm text-muted-foreground">
+                            耗时: {calcDuration(task)}
+                          </p>
+                        )}
+                      </div>
+                      <div className="flex gap-2">
+                        {task.status === "completed" && (
+                          <button
+                            onClick={() => setTestingTaskId(testingTaskId === task.id ? null : task.id)}
+                            className="flex items-center gap-1 rounded-lg border px-3 py-1.5 text-sm hover:bg-accent"
+                            aria-label="测试模型"
+                            tabIndex={0}
+                          >
+                            <TestTube className="h-4 w-4" />
+                            测试
+                          </button>
+                        )}
+                        <button
+                          onClick={() => handleDeleteTask(task.id)}
+                          className="flex items-center gap-1 rounded-lg border border-red-200 px-3 py-1.5 text-sm text-red-500 hover:bg-red-50"
+                          aria-label="删除任务"
+                          tabIndex={0}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 进度条 - 运行中时显示 */}
+                  {(task.status === "running" || task.status === "pending") && (
+                    <div className="px-4 pb-4">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-sm text-muted-foreground">训练进度</span>
+                        <span className="text-sm font-medium">{task.progress || 0}%</span>
+                      </div>
+                      <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
+                        <div
+                          className="h-full bg-blue-500 transition-all duration-500"
+                          style={{ width: `${task.progress || 0}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 错误信息 */}
+                  {task.status === "failed" && task.error_message && (
+                    <div className="mx-4 mb-4 rounded-lg bg-red-50 p-3 text-sm text-red-600">
+                      <strong>错误信息：</strong> {task.error_message}
+                    </div>
+                  )}
+
+                  {/* 完成信息 */}
+                  {task.status === "completed" && (
+                    <div className="mx-4 mb-4 rounded-lg bg-green-50 p-3 text-sm text-green-700">
+                      <p><strong>模型路径：</strong> {task.model_path}</p>
+                      {task.training_history && task.training_history.length > 0 && (
+                        <p className="mt-1">
+                          <strong>最终指标：</strong> 
+                          Loss: {task.training_history[task.training_history.length - 1]?.val_loss?.toFixed(4) || 'N/A'} | 
+                          Acc: {((task.training_history[task.training_history.length - 1]?.val_acc || 0) * 100).toFixed(1)}%
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  {/* 模型测试面板 */}
+                  {testingTaskId === task.id && task.status === "completed" && (
+                    <div className="border-t bg-muted/30 p-4">
+                      <h4 className="mb-3 font-medium">模型测试</h4>
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          value={testInput}
+                          onChange={(e) => setTestInput(e.target.value)}
+                          placeholder="输入测试文本..."
+                          className="flex-1 rounded-lg border bg-background px-3 py-2"
+                        />
+                        <button
+                          onClick={() => handleTestModel(task)}
+                          className="rounded-lg bg-primary px-4 py-2 text-primary-foreground hover:bg-primary/90"
+                        >
+                          预测
+                        </button>
+                      </div>
+                      {testResult && (
+                        <div className="mt-3 rounded-lg bg-background p-3 space-y-2">
+                          <p><strong>输入：</strong> {testResult.text}</p>
+                          <div className="flex items-center gap-2">
+                            <strong>预测结果：</strong>
+                            <span className={`inline-flex items-center gap-1 rounded-full px-3 py-1 text-sm font-medium ${
+                              testResult.prediction === 1 
+                                ? "bg-green-100 text-green-700" 
+                                : "bg-red-100 text-red-700"
+                            }`}>
+                              {testResult.prediction === 1 ? "👍 正面" : "👎 负面"}
+                              <span className="text-xs opacity-70">(标签: {testResult.prediction})</span>
+                            </span>
+                          </div>
+                          <p><strong>置信度：</strong> {(testResult.confidence * 100).toFixed(2)}%</p>
+                          {/* 语言提示 */}
+                          {(() => {
+                            const modelInfo = PRETRAINED_MODELS.find((m) => m.value === task.base_model);
+                            const isChineseInput = /[\u4e00-\u9fa5]/.test(testResult.text);
+                            const isChineseModel = modelInfo?.language?.includes("中文") || modelInfo?.language === "多语言";
+                            if (isChineseInput && !isChineseModel) {
+                              return (
+                                <div className="mt-2 rounded bg-yellow-50 p-2 text-xs text-yellow-700">
+                                  ⚠️ 提示：检测到输入为中文，但当前模型 ({modelInfo?.label}) 不支持中文。建议使用中文或多语言模型重新训练。
+                                </div>
+                              );
+                            }
+                            return null;
+                          })()}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}

@@ -1,0 +1,20 @@
+fastapi
+uvicorn
+requests
+httpx
+pydantic
+python-multipart
+torch
+transformers
+peft
+accelerate
+datasets
+evaluate
+scikit-learn
+pandas
+numpy
+gguf
+# PostgreSQL + SQLAlchemy 相关依赖
+sqlalchemy>=2.0.0
+psycopg2-binary
+alembic
