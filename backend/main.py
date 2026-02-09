@@ -54,6 +54,7 @@ class FinetuneRequest(BaseModel):
     max_length: int = 512
     text_column: str = "text"
     label_column: str = "target"
+    use_gpu: bool = True  # 是否使用GPU加速
 
 class AgentConfig(BaseModel):
     name: str
@@ -72,12 +73,42 @@ async def startup_event():
         print("✅ 数据库初始化成功")
     except Exception as e:
         print(f"⚠️ 数据库初始化失败: {e}")
-        print("请确保 PostgreSQL 已启动并创建了数据库")
+        print("请确保 MySQL 已启动并创建了数据库 agent_finetune")
 
 
 @app.get("/")
 async def root():
     return {"message": "Agent Finetune Platform API is running"}
+
+
+# --- GPU 状态接口 ---
+
+@app.get("/api/gpu/status")
+async def get_gpu_status():
+    """获取 GPU 状态信息"""
+    import torch
+    gpu_info = {
+        "cuda_available": torch.cuda.is_available(),
+        "cuda_version": None,
+        "device_count": 0,
+        "devices": [],
+        "pytorch_version": torch.__version__
+    }
+    
+    if torch.cuda.is_available():
+        gpu_info["cuda_version"] = torch.version.cuda
+        gpu_info["device_count"] = torch.cuda.device_count()
+        for i in range(torch.cuda.device_count()):
+            device_props = torch.cuda.get_device_properties(i)
+            gpu_info["devices"].append({
+                "index": i,
+                "name": device_props.name,
+                "total_memory_gb": round(device_props.total_memory / (1024**3), 2),
+                "major": device_props.major,
+                "minor": device_props.minor
+            })
+    
+    return gpu_info
 
 
 # --- Ollama 代理接口 ---
@@ -193,6 +224,23 @@ async def get_agent(agent_id: str, db: Session = Depends(get_db)):
     return agent.to_dict()
 
 
+@app.put("/api/agents/{agent_id}")
+async def update_agent(agent_id: str, agent: AgentConfig, db: Session = Depends(get_db)):
+    """更新 Agent"""
+    updated_agent = crud.update_agent(
+        db=db,
+        agent_id=agent_id,
+        name=agent.name,
+        role=agent.role,
+        system_prompt=agent.system_prompt,
+        model=agent.model,
+        config=agent.config
+    )
+    if not updated_agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return {"status": "success", "agent": updated_agent.to_dict()}
+
+
 @app.delete("/api/agents/{agent_id}")
 async def delete_agent(agent_id: str, db: Session = Depends(get_db)):
     """删除 Agent"""
@@ -206,13 +254,39 @@ async def delete_agent(agent_id: str, db: Session = Depends(get_db)):
 
 def run_finetune_task_sync(task_id: str, req: FinetuneRequest):
     """同步运行微调任务"""
+    import torch
     # 创建新的数据库会话（因为在线程中）
     from database import SessionLocal
     db = SessionLocal()
     
+    # 根据配置和硬件情况决定使用的设备
+    if req.use_gpu and torch.cuda.is_available():
+        device = "cuda"
+        print(f"🚀 使用 GPU 训练: {torch.cuda.get_device_name(0)}")
+    else:
+        device = "cpu"
+        if req.use_gpu and not torch.cuda.is_available():
+            print("⚠️ 请求使用 GPU 但 CUDA 不可用，回退到 CPU 训练")
+        else:
+            print("📌 使用 CPU 训练")
+    
+    # 进度回调函数
+    def progress_callback(current_epoch: int, total_epochs: int, progress: float):
+        """更新训练进度到数据库"""
+        try:
+            crud.update_finetune_task_status(
+                db=db,
+                task_id=task_id,
+                status=TaskStatus.RUNNING.value,
+                progress=progress
+            )
+            print(f"Task {task_id}: Epoch {current_epoch}/{total_epochs}, Progress: {progress:.1f}%")
+        except Exception as e:
+            print(f"Error updating progress: {e}")
+    
     try:
         # 更新任务状态为运行中
-        crud.update_finetune_task_status(db, task_id, TaskStatus.RUNNING.value)
+        crud.update_finetune_task_status(db, task_id, TaskStatus.RUNNING.value, progress=0.0)
         
         print(f"Starting finetune task {task_id} for model {req.new_model_name}...")
         
@@ -239,13 +313,15 @@ def run_finetune_task_sync(task_id: str, req: FinetuneRequest):
         val_loader = create_data_loader(val_texts, val_labels, tokenizer,
                                       batch_size=req.batch_size, max_length=req.max_length)
         
-        # 训练模型
+        # 训练模型（带进度回调和设备配置）
         history = train_model(
             model=model,
             train_loader=train_loader,
             val_loader=val_loader,
             epochs=req.epochs,
-            learning_rate=req.learning_rate
+            learning_rate=req.learning_rate,
+            progress_callback=progress_callback,
+            device=device  # 使用配置的设备
         )
         
         # 保存模型
@@ -310,7 +386,8 @@ async def start_finetune(req: FinetuneRequest, background_tasks: BackgroundTasks
         batch_size=req.batch_size,
         max_length=req.max_length,
         text_column=req.text_column,
-        label_column=req.label_column
+        label_column=req.label_column,
+        use_gpu=req.use_gpu
     )
     
     task_id = str(task.id)

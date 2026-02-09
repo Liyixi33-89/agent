@@ -15,6 +15,13 @@ interface DashboardCardProps {
   description: string;
 }
 
+interface FinetuneTaskStats {
+  total: number;
+  running: number;
+  completed: number;
+  failed: number;
+}
+
 function DashboardCard({ title, value, icon: Icon, description }: DashboardCardProps) {
   return (
     <Card>
@@ -35,6 +42,12 @@ export default function Home() {
   const [modelCount, setModelCount] = useState(0);
   const [modelNames, setModelNames] = useState("");
   const [isConnected, setIsConnected] = useState(false);
+  const [taskStats, setTaskStats] = useState<FinetuneTaskStats>({
+    total: 0,
+    running: 0,
+    completed: 0,
+    failed: 0,
+  });
 
   useEffect(() => {
     // 获取 Agent 数量
@@ -67,9 +80,41 @@ export default function Home() {
       }
     };
 
+    // 获取微调任务统计
+    const fetchFinetuneTasks = async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/finetune`);
+        if (res.ok) {
+          const data = await res.json();
+          const tasks = Array.isArray(data) ? data : [];
+          const stats: FinetuneTaskStats = {
+            total: tasks.length,
+            running: tasks.filter((t: any) => t.status === "running").length,
+            completed: tasks.filter((t: any) => t.status === "completed").length,
+            failed: tasks.filter((t: any) => t.status === "failed").length,
+          };
+          setTaskStats(stats);
+        }
+      } catch (error) {
+        console.error("获取微调任务失败:", error);
+      }
+    };
+
     fetchAgents();
     fetchModels();
+    fetchFinetuneTasks();
   }, []);
+
+  // 生成微调任务描述
+  const getTaskDescription = (): string => {
+    if (taskStats.running > 0) {
+      return `${taskStats.running} 个任务进行中`;
+    }
+    if (taskStats.total > 0) {
+      return `已完成 ${taskStats.completed}，失败 ${taskStats.failed}`;
+    }
+    return "暂无微调任务";
+  };
 
   return (
     <div className="flex min-h-screen">
@@ -100,9 +145,9 @@ export default function Home() {
           />
           <DashboardCard
             title="微调任务"
-            value="0"
+            value={taskStats.total}
             icon={Activity}
-            description="进行中的微调任务"
+            description={getTaskDescription()}
           />
           <DashboardCard
             title="API 请求"

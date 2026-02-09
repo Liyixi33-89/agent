@@ -24,7 +24,8 @@ def create_finetune_task(
     batch_size: int = 32,
     max_length: int = 512,
     text_column: str = "text",
-    label_column: str = "target"
+    label_column: str = "target",
+    use_gpu: bool = True
 ) -> FinetuneTask:
     """创建微调任务"""
     task = FinetuneTask(
@@ -37,6 +38,7 @@ def create_finetune_task(
         max_length=max_length,
         text_column=text_column,
         label_column=label_column,
+        use_gpu=use_gpu,
         status=TaskStatus.PENDING.value
     )
     db.add(task)
@@ -47,7 +49,7 @@ def create_finetune_task(
 
 def get_finetune_task(db: Session, task_id: str) -> Optional[FinetuneTask]:
     """根据 ID 获取微调任务"""
-    return db.query(FinetuneTask).filter(FinetuneTask.id == uuid.UUID(task_id)).first()
+    return db.query(FinetuneTask).filter(FinetuneTask.id == task_id).first()
 
 
 def get_all_finetune_tasks(
@@ -192,7 +194,7 @@ def create_agent(
 
 def get_agent(db: Session, agent_id: str) -> Optional[Agent]:
     """根据 ID 获取 Agent"""
-    return db.query(Agent).filter(Agent.id == uuid.UUID(agent_id)).first()
+    return db.query(Agent).filter(Agent.id == agent_id).first()
 
 
 def get_agent_by_name(db: Session, name: str) -> Optional[Agent]:
@@ -271,7 +273,7 @@ def create_model(
         path=path,
         description=description,
         parameters=parameters,
-        finetune_task_id=uuid.UUID(finetune_task_id) if finetune_task_id else None
+        finetune_task_id=finetune_task_id if finetune_task_id else None
     )
     db.add(model)
     db.commit()
@@ -281,7 +283,7 @@ def create_model(
 
 def get_model(db: Session, model_id: str) -> Optional[Model]:
     """根据 ID 获取模型"""
-    return db.query(Model).filter(Model.id == uuid.UUID(model_id)).first()
+    return db.query(Model).filter(Model.id == model_id).first()
 
 
 def get_model_by_name(db: Session, name: str) -> Optional[Model]:

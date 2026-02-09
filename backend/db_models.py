@@ -5,10 +5,14 @@
 
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Integer, Float, Text, DateTime, JSON, Enum, Boolean
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Column, String, Integer, Float, Text, DateTime, JSON, Enum, Boolean, CHAR
 from database import Base
 import enum
+
+
+def generate_uuid():
+    """生成 UUID 字符串"""
+    return str(uuid.uuid4())
 
 
 class TaskStatus(str, enum.Enum):
@@ -24,7 +28,7 @@ class FinetuneTask(Base):
     """微调任务表"""
     __tablename__ = "finetune_tasks"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(CHAR(36), primary_key=True, default=generate_uuid)
     
     # 基本信息
     base_model = Column(String(255), nullable=False, comment="基础模型名称")
@@ -38,6 +42,7 @@ class FinetuneTask(Base):
     max_length = Column(Integer, default=512, comment="最大序列长度")
     text_column = Column(String(100), default="text", comment="文本列名")
     label_column = Column(String(100), default="target", comment="标签列名")
+    use_gpu = Column(Boolean, default=True, comment="是否使用GPU加速")
     
     # 状态信息
     status = Column(String(20), default=TaskStatus.PENDING.value, comment="任务状态")
@@ -67,6 +72,7 @@ class FinetuneTask(Base):
             "max_length": self.max_length,
             "text_column": self.text_column,
             "label_column": self.label_column,
+            "use_gpu": self.use_gpu,
             "status": self.status,
             "progress": self.progress,
             "error_message": self.error_message,
@@ -83,7 +89,7 @@ class ChatHistory(Base):
     """聊天历史表"""
     __tablename__ = "chat_history"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(CHAR(36), primary_key=True, default=generate_uuid)
     session_id = Column(String(100), nullable=False, index=True, comment="会话ID")
     
     # 消息内容
@@ -114,7 +120,7 @@ class Agent(Base):
     """Agent 配置表"""
     __tablename__ = "agents"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(CHAR(36), primary_key=True, default=generate_uuid)
     
     # 基本信息
     name = Column(String(255), nullable=False, unique=True, comment="Agent名称")
@@ -149,7 +155,7 @@ class Model(Base):
     """模型管理表"""
     __tablename__ = "models"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(CHAR(36), primary_key=True, default=generate_uuid)
     
     # 基本信息
     name = Column(String(255), nullable=False, unique=True, comment="模型名称")
@@ -166,7 +172,7 @@ class Model(Base):
     metrics = Column(JSON, nullable=True, comment="模型评估指标")
     
     # 关联
-    finetune_task_id = Column(UUID(as_uuid=True), nullable=True, comment="关联的微调任务ID")
+    finetune_task_id = Column(CHAR(36), nullable=True, comment="关联的微调任务ID")
     
     # 时间戳
     created_at = Column(DateTime, default=datetime.utcnow, comment="创建时间")

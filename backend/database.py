@@ -1,6 +1,6 @@
 """
 数据库配置模块
-使用 PostgreSQL + SQLAlchemy 进行数据持久化
+使用 MySQL + SQLAlchemy 进行数据持久化
 """
 
 import os
@@ -8,11 +8,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
-# PostgreSQL 连接配置
-# 格式: postgresql://用户名:密码@主机:端口/数据库名
+# MySQL 连接配置
+# 格式: mysql+pymysql://用户名:密码@主机:端口/数据库名?charset=utf8mb4
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://postgres:postgres@localhost:5432/agent_finetune"
+    "mysql+pymysql://root:123456@localhost:3306/agent_finetune?charset=utf8mb4"
 )
 
 # 创建数据库引擎

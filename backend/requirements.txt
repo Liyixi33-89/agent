@@ -14,7 +14,8 @@ scikit-learn
 pandas
 numpy
 gguf
-# PostgreSQL + SQLAlchemy 相关依赖
+# MySQL + SQLAlchemy 相关依赖
 sqlalchemy>=2.0.0
-psycopg2-binary
+pymysql
+cryptography
 alembic

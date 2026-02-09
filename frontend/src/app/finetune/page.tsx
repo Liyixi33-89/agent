@@ -2,7 +2,7 @@
 
 import { Sidebar } from "@/components/Sidebar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Hammer, Play, CheckCircle, XCircle, Clock, RefreshCw, TestTube, Trash2 } from "lucide-react";
+import { Hammer, Play, CheckCircle, XCircle, Clock, RefreshCw, TestTube, Trash2, Cpu, Zap } from "lucide-react";
 import { useEffect, useState, useCallback, useRef } from "react";
 
 const API_BASE_URL = "http://localhost:8000";
@@ -70,6 +70,7 @@ interface FinetuneTask {
   max_length: number;
   text_column: string;
   label_column: string;
+  use_gpu: boolean;
   status: string;
   progress: number;
   error_message?: string;
@@ -87,6 +88,20 @@ interface TestResult {
   confidence: number;
 }
 
+interface GpuStatus {
+  cuda_available: boolean;
+  cuda_version: string | null;
+  device_count: number;
+  devices: Array<{
+    index: number;
+    name: string;
+    total_memory_gb: number;
+    major: number;
+    minor: number;
+  }>;
+  pytorch_version: string;
+}
+
 export default function FinetunePage() {
   const [tasks, setTasks] = useState<FinetuneTask[]>([]);
   const [showForm, setShowForm] = useState(false);
@@ -95,6 +110,7 @@ export default function FinetunePage() {
   const [testingTaskId, setTestingTaskId] = useState<string | null>(null);
   const [testInput, setTestInput] = useState("");
   const [testResult, setTestResult] = useState<TestResult | null>(null);
+  const [gpuStatus, setGpuStatus] = useState<GpuStatus | null>(null);
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
   
   const [formData, setFormData] = useState({
@@ -107,7 +123,21 @@ export default function FinetunePage() {
     max_length: 512,
     text_column: "text",
     label_column: "target",
+    use_gpu: true,
   });
+
+  // 获取 GPU 状态
+  const fetchGpuStatus = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/gpu/status`);
+      if (res.ok) {
+        const data = await res.json();
+        setGpuStatus(data);
+      }
+    } catch (error) {
+      console.error("获取GPU状态失败:", error);
+    }
+  }, []);
 
   // 加载任务列表
   const fetchTasks = useCallback(async () => {
@@ -124,15 +154,15 @@ export default function FinetunePage() {
     return [];
   }, []);
 
-  // 初始化加载任务
+  // 初始化加载任务和GPU状态
   useEffect(() => {
-    const loadTasks = async () => {
+    const loadData = async () => {
       setIsLoading(true);
-      await fetchTasks();
+      await Promise.all([fetchTasks(), fetchGpuStatus()]);
       setIsLoading(false);
     };
-    loadTasks();
-  }, [fetchTasks]);
+    loadData();
+  }, [fetchTasks, fetchGpuStatus]);
 
   // 轮询更新运行中的任务状态
   useEffect(() => {
@@ -339,6 +369,53 @@ export default function FinetunePage() {
           </div>
         </div>
 
+        {/* GPU 状态显示 */}
+        <Card className="mb-6">
+          <CardContent className="py-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                {gpuStatus?.cuda_available ? (
+                  <div className="flex h-10 w-10 items-center justify-center rounded-full bg-green-100">
+                    <Zap className="h-5 w-5 text-green-600" />
+                  </div>
+                ) : (
+                  <div className="flex h-10 w-10 items-center justify-center rounded-full bg-gray-100">
+                    <Cpu className="h-5 w-5 text-gray-600" />
+                  </div>
+                )}
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium">
+                      {gpuStatus?.cuda_available ? "🚀 GPU 加速可用" : "💻 仅 CPU 模式"}
+                    </span>
+                    {gpuStatus?.cuda_available && (
+                      <span className="rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700">
+                        CUDA {gpuStatus.cuda_version}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-sm text-muted-foreground">
+                    {gpuStatus?.cuda_available && gpuStatus.devices.length > 0
+                      ? `${gpuStatus.devices[0].name} (${gpuStatus.devices[0].total_memory_gb} GB)`
+                      : gpuStatus?.cuda_available === false
+                      ? "PyTorch GPU 版本未安装，建议安装以加速训练"
+                      : "正在检测..."
+                    }
+                  </p>
+                </div>
+              </div>
+              <div className="text-right text-sm text-muted-foreground">
+                <p>PyTorch: {gpuStatus?.pytorch_version || "-"}</p>
+                {!gpuStatus?.cuda_available && (
+                  <p className="text-xs text-amber-600 mt-1">
+                    运行: pip install torch --index-url https://download.pytorch.org/whl/cu121
+                  </p>
+                )}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
         {/* 微调表单 */}
         {showForm && (
           <Card className="mb-6">
@@ -452,6 +529,43 @@ export default function FinetunePage() {
                     placeholder="target"
                   />
                 </div>
+              </div>
+
+              {/* GPU 加速开关 */}
+              <div className="rounded-lg border bg-muted/30 p-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    {gpuStatus?.cuda_available ? (
+                      <Zap className="h-5 w-5 text-green-500" />
+                    ) : (
+                      <Cpu className="h-5 w-5 text-gray-400" />
+                    )}
+                    <div>
+                      <label className="font-medium">GPU 加速</label>
+                      <p className="text-sm text-muted-foreground">
+                        {gpuStatus?.cuda_available
+                          ? `使用 ${gpuStatus.devices[0]?.name || "GPU"} 加速训练`
+                          : "GPU 不可用，将使用 CPU 训练（速度较慢）"
+                        }
+                      </p>
+                    </div>
+                  </div>
+                  <label className="relative inline-flex cursor-pointer items-center">
+                    <input
+                      type="checkbox"
+                      checked={formData.use_gpu}
+                      onChange={(e) => handleInputChange("use_gpu", e.target.checked ? true : false)}
+                      disabled={!gpuStatus?.cuda_available}
+                      className="peer sr-only"
+                    />
+                    <div className={`h-6 w-11 rounded-full transition-colors after:absolute after:left-[2px] after:top-[2px] after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:bg-green-500 peer-checked:after:translate-x-full peer-checked:after:border-white peer-disabled:cursor-not-allowed peer-disabled:opacity-50 ${gpuStatus?.cuda_available ? 'bg-gray-200' : 'bg-gray-100'}`}></div>
+                  </label>
+                </div>
+                {!gpuStatus?.cuda_available && (
+                  <p className="mt-2 text-xs text-amber-600">
+                    💡 安装 GPU 版 PyTorch 可大幅提升训练速度: pip install torch --index-url https://download.pytorch.org/whl/cu121
+                  </p>
+                )}
               </div>
 
               <div className="flex gap-2">
