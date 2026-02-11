@@ -2,13 +2,14 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Bot, MessageSquare, Settings, Hammer } from "lucide-react";
+import { LayoutDashboard, Bot, MessageSquare, Settings, Hammer, Box } from "lucide-react";
 
 const navItems = [
   { name: "仪表盘", href: "/", icon: LayoutDashboard },
   { name: "智能体管理", href: "/agents", icon: Bot },
   { name: "对话测试", href: "/chat", icon: MessageSquare },
   { name: "模型微调", href: "/finetune", icon: Hammer },
+  { name: "模型管理", href: "/models", icon: Box },
   { name: "系统设置", href: "/settings", icon: Settings },
 ];
 

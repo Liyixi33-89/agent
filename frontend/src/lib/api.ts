@@ -69,10 +69,28 @@ export const api = {
   
   // 模型相关
   models: {
+    // Ollama 模型列表
     list: () => apiFetch("/api/models"),
+    // 数据库中的微调模型记录
     listFinetuned: () => apiFetch("/api/models/finetuned"),
+    // 获取本地 models/ 目录下的所有模型文件
+    listLocal: () => apiFetch<LocalModel[]>("/api/models/local"),
+    // 获取单个本地模型的详细信息
+    getLocalModel: (modelName: string) => apiFetch<LocalModelDetail>(`/api/models/local/${modelName}`),
+    // 删除本地模型
+    deleteLocal: (modelName: string) =>
+      apiFetch(`/api/models/local/${modelName}`, { method: "DELETE" }),
+    // 获取可用的基础模型列表（用于微调）
+    listAvailableBase: () => apiFetch<BaseModelOption[]>("/api/models/available-base"),
+    // 单条预测
     predict: (data: { model_path: string; text: string; base_model: string }) =>
-      apiFetch("/api/models/predict", {
+      apiFetch<PredictResponse>("/api/models/predict", {
+        method: "POST",
+        body: JSON.stringify(data),
+      }),
+    // 批量预测
+    batchPredict: (data: { texts: string[]; model_path: string; base_model: string }) =>
+      apiFetch<BatchPredictResponse>("/api/models/predict/batch", {
         method: "POST",
         body: JSON.stringify(data),
       }),
@@ -124,3 +142,45 @@ export const api = {
       apiFetch(`/api/chat/history/${sessionId}`, { method: "DELETE" }),
   },
 };
+
+// ==================== 类型定义 ====================
+
+// 本地模型信息
+export interface LocalModel {
+  name: string;
+  filename: string;
+  path: string;
+  size_mb: number;
+  created_at: string;
+  modified_at: string;
+  base_model?: string;
+  num_labels?: number;
+}
+
+// 本地模型详细信息
+export interface LocalModelDetail extends LocalModel {
+  has_state_dict?: boolean;
+}
+
+// 基础模型选项
+export interface BaseModelOption {
+  name: string;
+  description: string;
+  parameters: string;
+  recommended: boolean;
+}
+
+// 预测响应
+export interface PredictResponse {
+  text: string;
+  prediction: number;
+  confidence: number;
+  probabilities: number[];
+}
+
+// 批量预测响应
+export interface BatchPredictResponse {
+  model_path: string;
+  total: number;
+  results: PredictResponse[];
+}
