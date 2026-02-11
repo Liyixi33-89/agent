@@ -2,10 +2,9 @@
 
 import { Sidebar } from "@/components/Sidebar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Send, Bot, User } from "lucide-react";
-import { useEffect, useState, useRef } from "react";
-
-const API_BASE_URL = "http://localhost:8000";
+import { Send, Bot, User, Plus, Trash2, History, X } from "lucide-react";
+import { useEffect, useState, useRef, useCallback } from "react";
+import { useAppConfig } from "@/lib/config-context";
 
 interface Message {
   role: "user" | "assistant";
@@ -13,13 +12,22 @@ interface Message {
 }
 
 interface Agent {
+  id?: string;
   name: string;
   role: string;
   system_prompt: string;
   model: string;
 }
 
+interface ChatSession {
+  id: string;
+  lastMessage?: string;
+  timestamp?: string;
+}
+
 export default function ChatPage() {
+  const { config, getApiUrl, generateSessionId, updateConfig } = useAppConfig();
+  
   const [agents, setAgents] = useState<Agent[]>([]);
   const [models, setModels] = useState<string[]>([]);
   const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
@@ -27,6 +35,9 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // 获取智能体和模型
@@ -34,8 +45,8 @@ export default function ChatPage() {
     const fetchData = async () => {
       try {
         const [agentsRes, modelsRes] = await Promise.all([
-          fetch(`${API_BASE_URL}/api/agents`),
-          fetch(`${API_BASE_URL}/api/models`),
+          fetch(getApiUrl("/api/agents")),
+          fetch(getApiUrl("/api/models")),
         ]);
 
         if (agentsRes.ok) {
@@ -47,7 +58,7 @@ export default function ChatPage() {
           const modelsData = await modelsRes.json();
           const modelList = (modelsData.models || []).map((m: any) => m.name);
           setModels(modelList);
-          if (modelList.length > 0) {
+          if (modelList.length > 0 && !selectedModel) {
             setSelectedModel(modelList[0]);
           }
         }
@@ -57,16 +68,106 @@ export default function ChatPage() {
     };
 
     fetchData();
-  }, []);
+  }, [getApiUrl]);
+
+  // 获取历史会话列表
+  const fetchSessions = useCallback(async () => {
+    try {
+      const res = await fetch(getApiUrl("/api/chat/sessions"));
+      if (res.ok) {
+        const data = await res.json();
+        setSessions(data.sessions.map((id: string) => ({ id })));
+      }
+    } catch (error) {
+      console.error("获取会话列表失败:", error);
+    }
+  }, [getApiUrl]);
+
+  useEffect(() => {
+    fetchSessions();
+  }, [fetchSessions]);
+
+  // 初始化或恢复会话
+  useEffect(() => {
+    if (config.currentSessionId) {
+      setSessionId(config.currentSessionId);
+      // 加载该会话的历史消息
+      loadSessionHistory(config.currentSessionId);
+    }
+  }, [config.currentSessionId]);
+
+  // 加载会话历史
+  const loadSessionHistory = async (sid: string) => {
+    try {
+      const res = await fetch(getApiUrl(`/api/chat/history/${sid}`));
+      if (res.ok) {
+        const history = await res.json();
+        const loadedMessages: Message[] = history
+          .filter((msg: any) => msg.role !== "system")
+          .map((msg: any) => ({
+            role: msg.role as "user" | "assistant",
+            content: msg.content,
+          }));
+        setMessages(loadedMessages);
+      }
+    } catch (error) {
+      console.error("加载历史消息失败:", error);
+    }
+  };
 
   // 自动滚动到底部
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // 创建新会话
+  const handleNewSession = () => {
+    const newSessionId = generateSessionId();
+    setSessionId(newSessionId);
+    setMessages([]);
+    updateConfig({ currentSessionId: newSessionId });
+    fetchSessions();
+  };
+
+  // 切换到历史会话
+  const handleSelectSession = (sid: string) => {
+    setSessionId(sid);
+    updateConfig({ currentSessionId: sid });
+    loadSessionHistory(sid);
+    setShowHistory(false);
+  };
+
+  // 删除会话
+  const handleDeleteSession = async (sid: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!confirm("确定要删除这个会话吗？")) return;
+
+    try {
+      const res = await fetch(getApiUrl(`/api/chat/history/${sid}`), {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        setSessions((prev) => prev.filter((s) => s.id !== sid));
+        if (sessionId === sid) {
+          handleNewSession();
+        }
+      }
+    } catch (error) {
+      console.error("删除会话失败:", error);
+    }
+  };
+
   // 发送消息
   const handleSend = async () => {
     if (!input.trim() || isLoading) return;
+
+    // 如果没有会话ID，创建一个新的
+    let currentSessionId = sessionId;
+    if (!currentSessionId) {
+      currentSessionId = generateSessionId();
+      setSessionId(currentSessionId);
+      updateConfig({ currentSessionId: currentSessionId });
+    }
 
     const userMessage: Message = { role: "user", content: input };
     setMessages((prev) => [...prev, userMessage]);
@@ -77,7 +178,7 @@ export default function ChatPage() {
       const systemPrompt = selectedAgent?.system_prompt || "你是一个有帮助的AI助手。";
       const model = selectedAgent?.model || selectedModel;
 
-      const res = await fetch(`${API_BASE_URL}/api/chat`, {
+      const res = await fetch(getApiUrl("/api/chat"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -88,6 +189,7 @@ export default function ChatPage() {
             userMessage,
           ],
           stream: false,
+          session_id: currentSessionId,
         }),
       });
 
@@ -98,6 +200,8 @@ export default function ChatPage() {
           content: data.message?.content || "无响应",
         };
         setMessages((prev) => [...prev, assistantMessage]);
+        // 刷新会话列表
+        fetchSessions();
       } else {
         setMessages((prev) => [
           ...prev,
@@ -125,7 +229,8 @@ export default function ChatPage() {
   const handleSelectAgent = (agent: Agent) => {
     setSelectedAgent(agent);
     setSelectedModel(agent.model);
-    setMessages([]);
+    // 切换 Agent 时开始新会话
+    handleNewSession();
   };
 
   return (
@@ -134,7 +239,67 @@ export default function ChatPage() {
       <main className="flex flex-1 bg-muted/10">
         {/* 左侧选择区 */}
         <div className="w-64 border-r bg-card p-4">
-          <h2 className="mb-4 font-semibold">选择对话模式</h2>
+          <div className="mb-4 flex items-center justify-between">
+            <h2 className="font-semibold">对话</h2>
+            <div className="flex gap-1">
+              <button
+                onClick={() => setShowHistory(!showHistory)}
+                className="rounded p-1.5 hover:bg-accent"
+                aria-label="查看历史会话"
+                tabIndex={0}
+              >
+                <History className="h-4 w-4" />
+              </button>
+              <button
+                onClick={handleNewSession}
+                className="rounded p-1.5 hover:bg-accent"
+                aria-label="新建会话"
+                tabIndex={0}
+              >
+                <Plus className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+
+          {/* 历史会话列表 */}
+          {showHistory && sessions.length > 0 && (
+            <div className="mb-4 rounded-lg border bg-muted/30 p-2">
+              <div className="mb-2 flex items-center justify-between">
+                <span className="text-xs font-medium text-muted-foreground">历史会话</span>
+                <button
+                  onClick={() => setShowHistory(false)}
+                  className="rounded p-0.5 hover:bg-accent"
+                  aria-label="关闭历史"
+                  tabIndex={0}
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+              <div className="max-h-40 space-y-1 overflow-y-auto">
+                {sessions.map((session) => (
+                  <div
+                    key={session.id}
+                    onClick={() => handleSelectSession(session.id)}
+                    onKeyDown={(e) => e.key === "Enter" && handleSelectSession(session.id)}
+                    role="button"
+                    tabIndex={0}
+                    className={`flex cursor-pointer items-center justify-between rounded px-2 py-1 text-xs hover:bg-accent ${
+                      sessionId === session.id ? "bg-accent" : ""
+                    }`}
+                  >
+                    <span className="truncate">{session.id.slice(0, 20)}...</span>
+                    <button
+                      onClick={(e) => handleDeleteSession(session.id, e)}
+                      className="rounded p-0.5 opacity-0 hover:bg-red-100 group-hover:opacity-100"
+                      aria-label="删除会话"
+                    >
+                      <Trash2 className="h-3 w-3 text-red-500" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* 直接选择模型 */}
           <div className="mb-6">
@@ -146,6 +311,7 @@ export default function ChatPage() {
                 setSelectedAgent(null);
               }}
               className="w-full rounded-lg border bg-background px-3 py-2 text-sm"
+              aria-label="选择模型"
             >
               {models.length === 0 ? (
                 <option value="">暂无模型</option>
@@ -168,7 +334,7 @@ export default function ChatPage() {
               ) : (
                 agents.map((agent, index) => (
                   <button
-                    key={index}
+                    key={agent.id || index}
                     onClick={() => handleSelectAgent(agent)}
                     className={`w-full rounded-lg border p-2 text-left text-sm transition-colors hover:bg-accent ${
                       selectedAgent?.name === agent.name ? "border-primary bg-accent" : ""
@@ -189,10 +355,19 @@ export default function ChatPage() {
         <div className="flex flex-1 flex-col">
           {/* 头部 */}
           <div className="border-b bg-card p-4">
-            <h1 className="text-xl font-bold">对话测试</h1>
-            <p className="text-sm text-muted-foreground">
-              当前：{selectedAgent ? `智能体 - ${selectedAgent.name}` : `模型 - ${selectedModel || "未选择"}`}
-            </p>
+            <div className="flex items-center justify-between">
+              <div>
+                <h1 className="text-xl font-bold">对话测试</h1>
+                <p className="text-sm text-muted-foreground">
+                  当前：{selectedAgent ? `智能体 - ${selectedAgent.name}` : `模型 - ${selectedModel || "未选择"}`}
+                </p>
+              </div>
+              {sessionId && (
+                <div className="text-xs text-muted-foreground">
+                  会话: {sessionId.slice(0, 16)}...
+                </div>
+              )}
+            </div>
           </div>
 
           {/* 消息区 */}
@@ -203,6 +378,9 @@ export default function ChatPage() {
                   <Bot className="mx-auto mb-4 h-12 w-12" />
                   <p>开始与 AI 对话</p>
                   <p className="text-sm">在下方输入框输入消息</p>
+                  {!sessionId && (
+                    <p className="mt-2 text-xs">发送消息后将自动创建会话</p>
+                  )}
                 </div>
               </div>
             ) : (
@@ -259,6 +437,7 @@ export default function ChatPage() {
                 placeholder="输入消息... (Enter 发送，Shift+Enter 换行)"
                 rows={2}
                 disabled={isLoading}
+                aria-label="输入消息"
               />
               <button
                 onClick={handleSend}

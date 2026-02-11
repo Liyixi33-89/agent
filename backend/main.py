@@ -1,7 +1,7 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Set
 from contextlib import asynccontextmanager
 import httpx
 import os
@@ -10,6 +10,8 @@ import asyncio
 import threading
 import time
 import logging
+import shutil
+from datetime import datetime
 from sqlalchemy.orm import Session
 
 from utils_data import load_csv_data, load_json_data, create_data_loader, split_data
@@ -31,6 +33,70 @@ logger = logging.getLogger(__name__)
 # 存储运行中的任务线程，用于取消功能
 running_tasks: Dict[str, threading.Thread] = {}
 task_cancel_flags: Dict[str, bool] = {}
+
+# WebSocket 连接管理
+class ConnectionManager:
+    """WebSocket 连接管理器"""
+    def __init__(self):
+        # task_id -> set of websocket connections
+        self.active_connections: Dict[str, Set[WebSocket]] = {}
+    
+    async def connect(self, websocket: WebSocket, task_id: str):
+        await websocket.accept()
+        if task_id not in self.active_connections:
+            self.active_connections[task_id] = set()
+        self.active_connections[task_id].add(websocket)
+        logger.info(f"WebSocket connected for task {task_id}")
+    
+    def disconnect(self, websocket: WebSocket, task_id: str):
+        if task_id in self.active_connections:
+            self.active_connections[task_id].discard(websocket)
+            if not self.active_connections[task_id]:
+                del self.active_connections[task_id]
+        logger.info(f"WebSocket disconnected for task {task_id}")
+    
+    async def send_log(self, task_id: str, message: str, level: str = "info"):
+        """发送日志消息到所有订阅该任务的客户端"""
+        if task_id in self.active_connections:
+            log_data = {
+                "type": "log",
+                "task_id": task_id,
+                "level": level,
+                "message": message,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            dead_connections = set()
+            for connection in self.active_connections[task_id]:
+                try:
+                    await connection.send_json(log_data)
+                except Exception:
+                    dead_connections.add(connection)
+            # 清理断开的连接
+            for conn in dead_connections:
+                self.active_connections[task_id].discard(conn)
+    
+    async def send_progress(self, task_id: str, progress: float, epoch: int, total_epochs: int):
+        """发送进度更新"""
+        if task_id in self.active_connections:
+            progress_data = {
+                "type": "progress",
+                "task_id": task_id,
+                "progress": progress,
+                "epoch": epoch,
+                "total_epochs": total_epochs,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            dead_connections = set()
+            for connection in self.active_connections[task_id]:
+                try:
+                    await connection.send_json(progress_data)
+                except Exception:
+                    dead_connections.add(connection)
+            for conn in dead_connections:
+                self.active_connections[task_id].discard(conn)
+
+# 全局 WebSocket 管理器
+ws_manager = ConnectionManager()
 
 # 应用生命周期管理
 @asynccontextmanager
@@ -580,3 +646,151 @@ async def predict_with_model(req: PredictRequest):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+# --- 文件上传接口 ---
+
+# 创建上传目录
+UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(DATA_DIR, exist_ok=True)
+
+
+@app.post("/api/upload/dataset")
+async def upload_dataset(file: UploadFile = File(...)):
+    """上传数据集文件"""
+    # 检查文件类型
+    allowed_extensions = {".csv", ".json"}
+    file_ext = os.path.splitext(file.filename)[1].lower()
+    
+    if file_ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的文件类型: {file_ext}。请上传 .csv 或 .json 文件"
+        )
+    
+    # 生成安全的文件名
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_filename = f"{timestamp}_{file.filename}"
+    file_path = os.path.join(DATA_DIR, safe_filename)
+    
+    try:
+        # 保存文件
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        # 验证文件内容
+        if file_ext == ".csv":
+            import pandas as pd
+            df = pd.read_csv(file_path)
+            row_count = len(df)
+            columns = list(df.columns)
+        elif file_ext == ".json":
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                row_count = len(data)
+                columns = list(data[0].keys()) if data else []
+            else:
+                row_count = 1
+                columns = list(data.keys())
+        
+        # 返回相对路径（相对于后端根目录）
+        relative_path = f"data/{safe_filename}"
+        
+        logger.info(f"文件上传成功: {relative_path}, {row_count} 条记录")
+        
+        return {
+            "status": "success",
+            "file_path": relative_path,
+            "file_name": safe_filename,
+            "original_name": file.filename,
+            "file_size": os.path.getsize(file_path),
+            "row_count": row_count,
+            "columns": columns
+        }
+        
+    except Exception as e:
+        # 如果处理失败，删除已上传的文件
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        logger.error(f"文件上传失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"文件处理失败: {str(e)}")
+
+
+@app.get("/api/datasets")
+async def list_datasets():
+    """列出所有已上传的数据集"""
+    datasets = []
+    
+    for filename in os.listdir(DATA_DIR):
+        file_path = os.path.join(DATA_DIR, filename)
+        if os.path.isfile(file_path):
+            file_ext = os.path.splitext(filename)[1].lower()
+            if file_ext in {".csv", ".json"}:
+                stat = os.stat(file_path)
+                datasets.append({
+                    "name": filename,
+                    "path": f"data/{filename}",
+                    "size": stat.st_size,
+                    "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                    "type": file_ext[1:]  # csv 或 json
+                })
+    
+    # 按修改时间倒序排列
+    datasets.sort(key=lambda x: x["modified"], reverse=True)
+    return {"datasets": datasets}
+
+
+@app.delete("/api/datasets/{filename}")
+async def delete_dataset(filename: str):
+    """删除数据集文件"""
+    file_path = os.path.join(DATA_DIR, filename)
+    
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="文件不存在")
+    
+    try:
+        os.remove(file_path)
+        logger.info(f"数据集已删除: {filename}")
+        return {"status": "deleted", "filename": filename}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"删除失败: {str(e)}")
+
+
+# --- WebSocket 训练日志接口 ---
+
+@app.websocket("/ws/finetune/{task_id}")
+async def websocket_finetune_logs(websocket: WebSocket, task_id: str):
+    """WebSocket 接口：实时推送训练日志"""
+    await ws_manager.connect(websocket, task_id)
+    
+    try:
+        # 发送连接成功消息
+        await websocket.send_json({
+            "type": "connected",
+            "task_id": task_id,
+            "message": "已连接到训练日志流"
+        })
+        
+        # 保持连接，接收心跳或控制消息
+        while True:
+            try:
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+                # 处理心跳
+                if data == "ping":
+                    await websocket.send_text("pong")
+            except asyncio.TimeoutError:
+                # 发送心跳检测
+                try:
+                    await websocket.send_json({"type": "heartbeat"})
+                except Exception:
+                    break
+                    
+    except WebSocketDisconnect:
+        logger.info(f"WebSocket 断开: task {task_id}")
+    except Exception as e:
+        logger.error(f"WebSocket 错误: {e}")
+    finally:
+        ws_manager.disconnect(websocket, task_id)

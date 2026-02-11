@@ -2,10 +2,10 @@
 
 import { Sidebar } from "@/components/Sidebar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Hammer, Play, CheckCircle, XCircle, Clock, RefreshCw, TestTube, Trash2, Cpu, Zap } from "lucide-react";
+import { Hammer, Play, CheckCircle, XCircle, Clock, RefreshCw, TestTube, Trash2, Cpu, Zap, Upload, StopCircle, Terminal, X } from "lucide-react";
 import { useEffect, useState, useCallback, useRef } from "react";
-
-const API_BASE_URL = "http://localhost:8000";
+import { useAppConfig } from "@/lib/config-context";
+import { FileUpload } from "@/components/FileUpload";
 
 // 预训练模型列表
 const PRETRAINED_MODELS = [
@@ -103,6 +103,8 @@ interface GpuStatus {
 }
 
 export default function FinetunePage() {
+  const { config, getApiUrl } = useAppConfig();
+  
   const [tasks, setTasks] = useState<FinetuneTask[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -111,26 +113,31 @@ export default function FinetunePage() {
   const [testInput, setTestInput] = useState("");
   const [testResult, setTestResult] = useState<TestResult | null>(null);
   const [gpuStatus, setGpuStatus] = useState<GpuStatus | null>(null);
+  const [showUpload, setShowUpload] = useState(false);
+  const [logsTaskId, setLogsTaskId] = useState<string | null>(null);
+  const [logs, setLogs] = useState<string[]>([]);
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const logsEndRef = useRef<HTMLDivElement>(null);
   
   const [formData, setFormData] = useState({
-    base_model: "bert-base-uncased",
+    base_model: config.defaultBaseModel || "bert-base-uncased",
     dataset_path: "",
     new_model_name: "",
-    epochs: 3,
-    learning_rate: 2e-5,
-    batch_size: 8,  // 减小默认值以防止显存不足
-    max_length: 128,  // 减小默认值以防止显存不足
+    epochs: config.defaultEpochs || 3,
+    learning_rate: config.defaultLearningRate || 2e-5,
+    batch_size: config.defaultBatchSize || 8,
+    max_length: config.defaultMaxLength || 128,
     text_column: "text",
     label_column: "target",
-    use_gpu: true,
-    gradient_accumulation_steps: 4,  // 梯度累积步数
+    use_gpu: config.useGpuByDefault ?? true,
+    gradient_accumulation_steps: 4,
   });
 
   // 获取 GPU 状态
   const fetchGpuStatus = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE_URL}/api/gpu/status`);
+      const res = await fetch(getApiUrl("/api/gpu/status"));
       if (res.ok) {
         const data = await res.json();
         setGpuStatus(data);
@@ -138,12 +145,12 @@ export default function FinetunePage() {
     } catch (error) {
       console.error("获取GPU状态失败:", error);
     }
-  }, []);
+  }, [getApiUrl]);
 
   // 加载任务列表
   const fetchTasks = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE_URL}/api/finetune`);
+      const res = await fetch(getApiUrl("/api/finetune"));
       if (res.ok) {
         const data = await res.json();
         setTasks(data);
@@ -153,7 +160,7 @@ export default function FinetunePage() {
       console.error("获取任务列表失败:", error);
     }
     return [];
-  }, []);
+  }, [getApiUrl]);
 
   // 初始化加载任务和GPU状态
   useEffect(() => {
@@ -200,7 +207,7 @@ export default function FinetunePage() {
 
     setIsSubmitting(true);
     try {
-      const res = await fetch(`${API_BASE_URL}/api/finetune`, {
+      const res = await fetch(getApiUrl("/api/finetune"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(formData),
@@ -212,6 +219,8 @@ export default function FinetunePage() {
         setShowForm(false);
         // 重新加载任务列表
         await fetchTasks();
+        // 自动连接 WebSocket 查看日志
+        connectWebSocket(data.task_id);
       } else {
         const error = await res.json();
         alert(`启动失败: ${error.detail || "未知错误"}`);
@@ -224,12 +233,33 @@ export default function FinetunePage() {
     }
   };
 
+  // 取消任务
+  const handleCancelTask = async (taskId: string) => {
+    if (!confirm("确定要取消这个任务吗？")) return;
+    
+    try {
+      const res = await fetch(getApiUrl(`/api/finetune/${taskId}/cancel`), {
+        method: "POST",
+      });
+      if (res.ok) {
+        const data = await res.json();
+        alert(data.message || "任务正在取消...");
+        await fetchTasks();
+      } else {
+        const error = await res.json();
+        alert(`取消失败: ${error.detail || "未知错误"}`);
+      }
+    } catch (error) {
+      console.error("取消任务失败:", error);
+    }
+  };
+
   // 删除任务
   const handleDeleteTask = async (taskId: string) => {
     if (!confirm("确定要删除这个任务吗？")) return;
     
     try {
-      const res = await fetch(`${API_BASE_URL}/api/finetune/${taskId}`, {
+      const res = await fetch(getApiUrl(`/api/finetune/${taskId}`), {
         method: "DELETE",
       });
       if (res.ok) {
@@ -242,6 +272,77 @@ export default function FinetunePage() {
     }
   };
 
+  // WebSocket 连接训练日志
+  const connectWebSocket = (taskId: string) => {
+    // 关闭旧连接
+    if (wsRef.current) {
+      wsRef.current.close();
+    }
+    
+    setLogsTaskId(taskId);
+    setLogs([]);
+    
+    const wsUrl = config.backendUrl.replace(/^http/, "ws");
+    const ws = new WebSocket(`${wsUrl}/ws/finetune/${taskId}`);
+    
+    ws.onopen = () => {
+      setLogs((prev) => [...prev, `[连接已建立] 正在监听任务 ${taskId} 的训练日志...`]);
+    };
+    
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === "log") {
+          const timestamp = new Date(data.timestamp).toLocaleTimeString();
+          setLogs((prev) => [...prev, `[${timestamp}] [${data.level.toUpperCase()}] ${data.message}`]);
+        } else if (data.type === "progress") {
+          setLogs((prev) => [...prev, `[进度] Epoch ${data.epoch}/${data.total_epochs} - ${data.progress.toFixed(1)}%`]);
+        } else if (data.type === "connected") {
+          setLogs((prev) => [...prev, `[系统] ${data.message}`]);
+        }
+      } catch {
+        // 普通文本消息
+        if (event.data !== "pong") {
+          setLogs((prev) => [...prev, event.data]);
+        }
+      }
+    };
+    
+    ws.onerror = () => {
+      setLogs((prev) => [...prev, "[错误] WebSocket 连接失败"]);
+    };
+    
+    ws.onclose = () => {
+      setLogs((prev) => [...prev, "[连接已关闭]"]);
+    };
+    
+    wsRef.current = ws;
+  };
+
+  // 关闭 WebSocket 和日志面板
+  const closeLogsPanel = () => {
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    setLogsTaskId(null);
+    setLogs([]);
+  };
+
+  // 自动滚动日志
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [logs]);
+
+  // 组件卸载时清理 WebSocket
+  useEffect(() => {
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
+    };
+  }, []);
+
   // 测试模型
   const handleTestModel = async (task: FinetuneTask) => {
     if (!testInput.trim()) {
@@ -250,7 +351,7 @@ export default function FinetunePage() {
     }
 
     try {
-      const res = await fetch(`${API_BASE_URL}/api/models/predict`, {
+      const res = await fetch(getApiUrl("/api/models/predict"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -457,15 +558,39 @@ export default function FinetunePage() {
               </div>
 
               <div>
-                <label className="mb-2 block text-sm font-medium">数据集路径 *</label>
-                <input
-                  type="text"
-                  value={formData.dataset_path}
-                  onChange={(e) => handleInputChange("dataset_path", e.target.value)}
-                  className="w-full rounded-lg border bg-background px-3 py-2"
-                  placeholder="data/sample_train.csv"
-                />
-                <p className="mt-1 text-xs text-muted-foreground">支持 CSV 或 JSON 格式，示例：data/sample_train.csv</p>
+                <div className="mb-2 flex items-center justify-between">
+                  <label className="text-sm font-medium">数据集路径 *</label>
+                  <button
+                    type="button"
+                    onClick={() => setShowUpload(!showUpload)}
+                    className="flex items-center gap-1 text-xs text-primary hover:underline"
+                  >
+                    <Upload className="h-3 w-3" />
+                    {showUpload ? "手动输入" : "上传文件"}
+                  </button>
+                </div>
+                
+                {showUpload ? (
+                  <FileUpload
+                    onUploadSuccess={(filePath) => {
+                      handleInputChange("dataset_path", filePath);
+                      setShowUpload(false);
+                    }}
+                    accept=".csv,.json"
+                    maxSize={50}
+                  />
+                ) : (
+                  <>
+                    <input
+                      type="text"
+                      value={formData.dataset_path}
+                      onChange={(e) => handleInputChange("dataset_path", e.target.value)}
+                      className="w-full rounded-lg border bg-background px-3 py-2"
+                      placeholder="data/sample_train.csv"
+                    />
+                    <p className="mt-1 text-xs text-muted-foreground">支持 CSV 或 JSON 格式，示例：data/sample_train.csv</p>
+                  </>
+                )}
               </div>
 
               <div className="grid gap-4 md:grid-cols-4">
@@ -663,6 +788,29 @@ export default function FinetunePage() {
                         )}
                       </div>
                       <div className="flex gap-2">
+                        {/* 运行中的任务显示取消和日志按钮 */}
+                        {(task.status === "running" || task.status === "pending") && (
+                          <>
+                            <button
+                              onClick={() => connectWebSocket(task.id)}
+                              className="flex items-center gap-1 rounded-lg border px-3 py-1.5 text-sm hover:bg-accent"
+                              aria-label="查看日志"
+                              tabIndex={0}
+                            >
+                              <Terminal className="h-4 w-4" />
+                              日志
+                            </button>
+                            <button
+                              onClick={() => handleCancelTask(task.id)}
+                              className="flex items-center gap-1 rounded-lg border border-orange-200 px-3 py-1.5 text-sm text-orange-500 hover:bg-orange-50"
+                              aria-label="取消任务"
+                              tabIndex={0}
+                            >
+                              <StopCircle className="h-4 w-4" />
+                              取消
+                            </button>
+                          </>
+                        )}
                         {task.status === "completed" && (
                           <button
                             onClick={() => setTestingTaskId(testingTaskId === task.id ? null : task.id)}
@@ -778,6 +926,41 @@ export default function FinetunePage() {
                 </CardContent>
               </Card>
             ))}
+          </div>
+        )}
+
+        {/* 训练日志面板 */}
+        {logsTaskId && (
+          <div className="fixed bottom-0 left-64 right-0 z-50 border-t bg-card shadow-lg">
+            <div className="flex items-center justify-between border-b px-4 py-2">
+              <div className="flex items-center gap-2">
+                <Terminal className="h-4 w-4 text-green-500" />
+                <span className="font-medium">训练日志</span>
+                <span className="text-xs text-muted-foreground">
+                  任务: {logsTaskId.slice(0, 8)}...
+                </span>
+              </div>
+              <button
+                onClick={closeLogsPanel}
+                className="rounded p-1 hover:bg-muted"
+                aria-label="关闭日志"
+                tabIndex={0}
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="h-48 overflow-y-auto bg-gray-900 p-4 font-mono text-sm text-green-400">
+              {logs.length === 0 ? (
+                <p className="text-gray-500">等待日志...</p>
+              ) : (
+                logs.map((log, index) => (
+                  <div key={index} className="whitespace-pre-wrap">
+                    {log}
+                  </div>
+                ))
+              )}
+              <div ref={logsEndRef} />
+            </div>
           </div>
         )}
       </main>
