@@ -50,11 +50,12 @@ class FinetuneRequest(BaseModel):
     new_model_name: str
     epochs: int = 3
     learning_rate: float = 2e-5
-    batch_size: int = 32
-    max_length: int = 512
+    batch_size: int = 8  # 减小默认值避免GPU显存不足
+    max_length: int = 128  # 减小默认值避免GPU显存不足
     text_column: str = "text"
     label_column: str = "target"
     use_gpu: bool = True  # 是否使用GPU加速
+    gradient_accumulation_steps: int = 4  # 梯度累积步数，等效于更大的batch_size
 
 class AgentConfig(BaseModel):
     name: str
@@ -118,10 +119,12 @@ async def list_models():
     """获取 Ollama 中的本地模型"""
     async with httpx.AsyncClient() as client:
         try:
-            resp = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
+            resp = await client.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5.0)
             return resp.json()
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to connect to Ollama: {str(e)}")
+            # Ollama 不可用时返回空列表，而不是报错
+            print(f"⚠️ 无法连接 Ollama ({OLLAMA_BASE_URL}): {str(e)}")
+            return {"models": [], "error": f"Ollama 服务未运行，请启动 Ollama: ollama serve"}
 
 
 @app.post("/api/chat")
@@ -313,7 +316,7 @@ def run_finetune_task_sync(task_id: str, req: FinetuneRequest):
         val_loader = create_data_loader(val_texts, val_labels, tokenizer,
                                       batch_size=req.batch_size, max_length=req.max_length)
         
-        # 训练模型（带进度回调和设备配置）
+        # 训练模型（带进度回调、设备配置和显存优化）
         history = train_model(
             model=model,
             train_loader=train_loader,
@@ -321,7 +324,9 @@ def run_finetune_task_sync(task_id: str, req: FinetuneRequest):
             epochs=req.epochs,
             learning_rate=req.learning_rate,
             progress_callback=progress_callback,
-            device=device  # 使用配置的设备
+            device=device,  # 使用配置的设备
+            gradient_accumulation_steps=req.gradient_accumulation_steps,  # 梯度累积
+            use_amp=(device == "cuda")  # GPU时启用混合精度训练
         )
         
         # 保存模型
@@ -385,6 +390,7 @@ async def start_finetune(req: FinetuneRequest, background_tasks: BackgroundTasks
         learning_rate=req.learning_rate,
         batch_size=req.batch_size,
         max_length=req.max_length,
+        gradient_accumulation_steps=req.gradient_accumulation_steps,
         text_column=req.text_column,
         label_column=req.label_column,
         use_gpu=req.use_gpu

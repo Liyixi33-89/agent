@@ -21,8 +21,9 @@ def create_finetune_task(
     dataset_path: str,
     epochs: int = 3,
     learning_rate: float = 2e-5,
-    batch_size: int = 32,
-    max_length: int = 512,
+    batch_size: int = 8,
+    max_length: int = 128,
+    gradient_accumulation_steps: int = 4,
     text_column: str = "text",
     label_column: str = "target",
     use_gpu: bool = True

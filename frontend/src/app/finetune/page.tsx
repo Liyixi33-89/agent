@@ -119,11 +119,12 @@ export default function FinetunePage() {
     new_model_name: "",
     epochs: 3,
     learning_rate: 2e-5,
-    batch_size: 32,
-    max_length: 512,
+    batch_size: 8,  // 减小默认值以防止显存不足
+    max_length: 128,  // 减小默认值以防止显存不足
     text_column: "text",
     label_column: "target",
     use_gpu: true,
+    gradient_accumulation_steps: 4,  // 梯度累积步数
   });
 
   // 获取 GPU 状态
@@ -495,7 +496,12 @@ export default function FinetunePage() {
                     value={formData.batch_size}
                     onChange={(e) => handleInputChange("batch_size", parseInt(e.target.value))}
                     className="w-full rounded-lg border bg-background px-3 py-2"
+                    min={1}
+                    max={64}
                   />
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    推荐: 4-16 (显存不足时减小)
+                  </p>
                 </div>
                 <div>
                   <label className="mb-2 block text-sm font-medium">最大长度</label>
@@ -504,7 +510,26 @@ export default function FinetunePage() {
                     value={formData.max_length}
                     onChange={(e) => handleInputChange("max_length", parseInt(e.target.value))}
                     className="w-full rounded-lg border bg-background px-3 py-2"
+                    min={32}
+                    max={512}
                   />
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    推荐: 64-256 (显存不足时减小)
+                  </p>
+                </div>
+                <div>
+                  <label className="mb-2 block text-sm font-medium">梯度累积步数</label>
+                  <input
+                    type="number"
+                    value={formData.gradient_accumulation_steps}
+                    onChange={(e) => handleInputChange("gradient_accumulation_steps", parseInt(e.target.value))}
+                    className="w-full rounded-lg border bg-background px-3 py-2"
+                    min={1}
+                    max={32}
+                  />
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    等效batch_size: {formData.batch_size * formData.gradient_accumulation_steps}
+                  </p>
                 </div>
               </div>
 

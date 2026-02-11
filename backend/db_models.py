@@ -38,8 +38,9 @@ class FinetuneTask(Base):
     # 训练参数
     epochs = Column(Integer, default=3, comment="训练轮数")
     learning_rate = Column(Float, default=2e-5, comment="学习率")
-    batch_size = Column(Integer, default=32, comment="批次大小")
-    max_length = Column(Integer, default=512, comment="最大序列长度")
+    batch_size = Column(Integer, default=8, comment="批次大小(GPU显存优化)")
+    max_length = Column(Integer, default=128, comment="最大序列长度(GPU显存优化)")
+    gradient_accumulation_steps = Column(Integer, default=4, comment="梯度累积步数")
     text_column = Column(String(100), default="text", comment="文本列名")
     label_column = Column(String(100), default="target", comment="标签列名")
     use_gpu = Column(Boolean, default=True, comment="是否使用GPU加速")
