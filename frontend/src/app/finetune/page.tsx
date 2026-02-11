@@ -282,41 +282,63 @@ export default function FinetunePage() {
     setLogsTaskId(taskId);
     setLogs([]);
     
-    const wsUrl = config.backendUrl.replace(/^http/, "ws");
-    const ws = new WebSocket(`${wsUrl}/ws/finetune/${taskId}`);
+    // 构建 WebSocket URL
+    const backendUrl = config.backendUrl || "http://localhost:8000";
+    const wsUrl = backendUrl.replace(/^http/, "ws");
+    const fullWsUrl = `${wsUrl}/ws/finetune/${taskId}`;
     
-    ws.onopen = () => {
-      setLogs((prev) => [...prev, `[连接已建立] 正在监听任务 ${taskId} 的训练日志...`]);
-    };
+    setLogs((prev) => [...prev, `[系统] 正在连接: ${fullWsUrl}`]);
     
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.type === "log") {
-          const timestamp = new Date(data.timestamp).toLocaleTimeString();
-          setLogs((prev) => [...prev, `[${timestamp}] [${data.level.toUpperCase()}] ${data.message}`]);
-        } else if (data.type === "progress") {
-          setLogs((prev) => [...prev, `[进度] Epoch ${data.epoch}/${data.total_epochs} - ${data.progress.toFixed(1)}%`]);
-        } else if (data.type === "connected") {
-          setLogs((prev) => [...prev, `[系统] ${data.message}`]);
+    try {
+      const ws = new WebSocket(fullWsUrl);
+      
+      ws.onopen = () => {
+        setLogs((prev) => [...prev, `[连接已建立] 正在监听任务 ${taskId} 的训练日志...`]);
+      };
+      
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === "log") {
+            const timestamp = new Date(data.timestamp).toLocaleTimeString();
+            setLogs((prev) => [...prev, `[${timestamp}] [${data.level.toUpperCase()}] ${data.message}`]);
+          } else if (data.type === "progress") {
+            setLogs((prev) => [...prev, `[进度] Epoch ${data.epoch}/${data.total_epochs} - ${data.progress.toFixed(1)}%`]);
+          } else if (data.type === "connected") {
+            setLogs((prev) => [...prev, `[系统] ${data.message}`]);
+          } else if (data.type === "heartbeat") {
+            // 忽略心跳消息
+          }
+        } catch {
+          // 普通文本消息
+          if (event.data !== "pong") {
+            setLogs((prev) => [...prev, event.data]);
+          }
         }
-      } catch {
-        // 普通文本消息
-        if (event.data !== "pong") {
-          setLogs((prev) => [...prev, event.data]);
+      };
+      
+      ws.onerror = (error) => {
+        console.error("WebSocket error:", error);
+        setLogs((prev) => [
+          ...prev, 
+          `[错误] WebSocket 连接失败`,
+          `[提示] 请检查后端服务是否运行在 ${backendUrl}`,
+          `[提示] 确保后端已启动并监听 WebSocket 连接`
+        ]);
+      };
+      
+      ws.onclose = (event) => {
+        if (event.wasClean) {
+          setLogs((prev) => [...prev, `[连接已关闭] code=${event.code}`]);
+        } else {
+          setLogs((prev) => [...prev, `[连接异常断开] code=${event.code}, reason=${event.reason || "未知"}`]);
         }
-      }
-    };
-    
-    ws.onerror = () => {
-      setLogs((prev) => [...prev, "[错误] WebSocket 连接失败"]);
-    };
-    
-    ws.onclose = () => {
-      setLogs((prev) => [...prev, "[连接已关闭]"]);
-    };
-    
-    wsRef.current = ws;
+      };
+      
+      wsRef.current = ws;
+    } catch (error) {
+      setLogs((prev) => [...prev, `[错误] 创建 WebSocket 失败: ${error}`]);
+    }
   };
 
   // 关闭 WebSocket 和日志面板
