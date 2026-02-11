@@ -1,13 +1,15 @@
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
+from contextlib import asynccontextmanager
 import httpx
 import os
 import json
 import asyncio
 import threading
 import time
+import logging
 from sqlalchemy.orm import Session
 
 from utils_data import load_csv_data, load_json_data, create_data_loader, split_data
@@ -19,7 +21,39 @@ from database import get_db, init_db, engine
 from db_models import FinetuneTask, ChatHistory, Agent as AgentModel, Model as ModelRecord, TaskStatus
 import crud
 
-app = FastAPI(title="Agent 微调平台")
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# 存储运行中的任务线程，用于取消功能
+running_tasks: Dict[str, threading.Thread] = {}
+task_cancel_flags: Dict[str, bool] = {}
+
+# 应用生命周期管理
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用启动和关闭时的生命周期管理"""
+    # 启动时初始化
+    try:
+        init_db()
+        logger.info("✅ 数据库初始化成功")
+    except Exception as e:
+        logger.error(f"⚠️ 数据库初始化失败: {e}")
+        logger.error("请确保 MySQL 已启动并创建了数据库 agent_finetune")
+    
+    yield  # 应用运行中
+    
+    # 关闭时清理
+    logger.info("🔄 应用正在关闭，清理资源...")
+    # 取消所有运行中的任务
+    for task_id in list(task_cancel_flags.keys()):
+        task_cancel_flags[task_id] = True
+    logger.info("✅ 应用已关闭")
+
+app = FastAPI(title="Agent 微调平台", lifespan=lifespan)
 
 # 配置 CORS，允许前端跨域访问
 app.add_middleware(
@@ -48,14 +82,14 @@ class FinetuneRequest(BaseModel):
     base_model: str
     dataset_path: str
     new_model_name: str
-    epochs: int = 3
-    learning_rate: float = 2e-5
-    batch_size: int = 8  # 减小默认值避免GPU显存不足
-    max_length: int = 128  # 减小默认值避免GPU显存不足
+    epochs: int = Field(default=3, ge=1, le=100, description="训练轮数")
+    learning_rate: float = Field(default=2e-5, gt=0, description="学习率")
+    batch_size: int = Field(default=8, ge=1, le=64, description="批次大小")  # 减小默认值避免GPU显存不足
+    max_length: int = Field(default=128, ge=32, le=512, description="最大序列长度")  # 减小默认值避免GPU显存不足
     text_column: str = "text"
     label_column: str = "target"
     use_gpu: bool = True  # 是否使用GPU加速
-    gradient_accumulation_steps: int = 4  # 梯度累积步数，等效于更大的batch_size
+    gradient_accumulation_steps: int = Field(default=4, ge=1, le=32, description="梯度累积步数")  # 梯度累积步数，等效于更大的batch_size
 
 class AgentConfig(BaseModel):
     name: str
@@ -63,18 +97,6 @@ class AgentConfig(BaseModel):
     system_prompt: str
     model: str
     config: Optional[Dict] = None
-
-
-# 启动时初始化数据库
-@app.on_event("startup")
-async def startup_event():
-    """应用启动时初始化数据库"""
-    try:
-        init_db()
-        print("✅ 数据库初始化成功")
-    except Exception as e:
-        print(f"⚠️ 数据库初始化失败: {e}")
-        print("请确保 MySQL 已启动并创建了数据库 agent_finetune")
 
 
 @app.get("/")
@@ -262,20 +284,27 @@ def run_finetune_task_sync(task_id: str, req: FinetuneRequest):
     from database import SessionLocal
     db = SessionLocal()
     
+    # 初始化取消标志
+    task_cancel_flags[task_id] = False
+    
     # 根据配置和硬件情况决定使用的设备
     if req.use_gpu and torch.cuda.is_available():
         device = "cuda"
-        print(f"🚀 使用 GPU 训练: {torch.cuda.get_device_name(0)}")
+        logger.info(f"🚀 使用 GPU 训练: {torch.cuda.get_device_name(0)}")
     else:
         device = "cpu"
         if req.use_gpu and not torch.cuda.is_available():
-            print("⚠️ 请求使用 GPU 但 CUDA 不可用，回退到 CPU 训练")
+            logger.warning("⚠️ 请求使用 GPU 但 CUDA 不可用，回退到 CPU 训练")
         else:
-            print("📌 使用 CPU 训练")
+            logger.info("📌 使用 CPU 训练")
     
     # 进度回调函数
     def progress_callback(current_epoch: int, total_epochs: int, progress: float):
         """更新训练进度到数据库"""
+        # 检查取消标志
+        if task_cancel_flags.get(task_id, False):
+            raise InterruptedError("任务已被用户取消")
+        
         try:
             crud.update_finetune_task_status(
                 db=db,
@@ -283,15 +312,15 @@ def run_finetune_task_sync(task_id: str, req: FinetuneRequest):
                 status=TaskStatus.RUNNING.value,
                 progress=progress
             )
-            print(f"Task {task_id}: Epoch {current_epoch}/{total_epochs}, Progress: {progress:.1f}%")
+            logger.info(f"Task {task_id}: Epoch {current_epoch}/{total_epochs}, Progress: {progress:.1f}%")
         except Exception as e:
-            print(f"Error updating progress: {e}")
+            logger.error(f"Error updating progress: {e}")
     
     try:
         # 更新任务状态为运行中
         crud.update_finetune_task_status(db, task_id, TaskStatus.RUNNING.value, progress=0.0)
         
-        print(f"Starting finetune task {task_id} for model {req.new_model_name}...")
+        logger.info(f"Starting finetune task {task_id} for model {req.new_model_name}...")
         
         # 加载数据
         if req.dataset_path.endswith('.csv'):
@@ -355,18 +384,34 @@ def run_finetune_task_sync(task_id: str, req: FinetuneRequest):
             finetune_task_id=task_id
         )
         
-        print(f"Finetune task {task_id} completed. Model saved to {model_path}")
+        logger.info(f"Finetune task {task_id} completed. Model saved to {model_path}")
         
+    except InterruptedError as e:
+        # 任务被取消
+        crud.update_finetune_task_status(
+            db=db,
+            task_id=task_id,
+            status=TaskStatus.CANCELLED.value,
+            error_message=str(e)
+        )
+        logger.warning(f"Finetune task {task_id} cancelled: {str(e)}")
     except Exception as e:
         # 更新任务状态为失败
+        import traceback
+        error_detail = f"{str(e)}\n{traceback.format_exc()}"
         crud.update_finetune_task_status(
             db=db,
             task_id=task_id,
             status=TaskStatus.FAILED.value,
-            error_message=str(e)
+            error_message=error_detail
         )
-        print(f"Finetune task {task_id} failed: {str(e)}")
+        logger.error(f"Finetune task {task_id} failed: {str(e)}")
     finally:
+        # 清理取消标志
+        if task_id in task_cancel_flags:
+            del task_cancel_flags[task_id]
+        if task_id in running_tasks:
+            del running_tasks[task_id]
         db.close()
 
 
@@ -375,6 +420,8 @@ async def run_finetune_task(task_id: str, req: FinetuneRequest):
     # 在线程中运行同步任务
     thread = threading.Thread(target=run_finetune_task_sync, args=(task_id, req))
     thread.start()
+    # 记录运行中的任务
+    running_tasks[task_id] = thread
 
 
 @app.post("/api/finetune")
@@ -433,6 +480,32 @@ async def delete_finetune_task(task_id: str, db: Session = Depends(get_db)):
     if not success:
         raise HTTPException(status_code=404, detail="Task not found")
     return {"status": "deleted"}
+
+
+@app.post("/api/finetune/{task_id}/cancel")
+async def cancel_finetune_task(task_id: str, db: Session = Depends(get_db)):
+    """取消正在运行的微调任务"""
+    task = crud.get_finetune_task(db, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    if task.status not in [TaskStatus.RUNNING.value, TaskStatus.PENDING.value]:
+        raise HTTPException(status_code=400, detail=f"无法取消状态为 {task.status} 的任务")
+    
+    # 设置取消标志
+    if task_id in task_cancel_flags:
+        task_cancel_flags[task_id] = True
+        logger.info(f"任务 {task_id} 已标记为取消")
+        return {"status": "cancelling", "message": "任务正在取消中，请稍候..."}
+    else:
+        # 任务可能还未开始运行，直接更新状态
+        crud.update_finetune_task_status(
+            db=db,
+            task_id=task_id,
+            status=TaskStatus.CANCELLED.value,
+            error_message="任务在启动前被取消"
+        )
+        return {"status": "cancelled", "message": "任务已取消"}
 
 
 # --- 模型管理接口 ---

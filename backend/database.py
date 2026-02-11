@@ -21,6 +21,8 @@ engine = create_engine(
     pool_size=5,           # 连接池大小
     max_overflow=10,       # 最大溢出连接数
     pool_pre_ping=True,    # 自动检测断开的连接
+    pool_recycle=3600,     # 连接回收时间(秒)，防止连接超时
+    pool_timeout=30,       # 连接超时时间(秒)
     echo=False             # 设为 True 可打印 SQL 语句，用于调试
 )
 
